@@ -1,8 +1,19 @@
-TAGS := daemon btrfs_noversion
-PKGS := $(shell go list ./... | grep -v 'github.com/libopenstorage/openstorage/vendor')
-
+ifndef TAGS
+TAGS := daemon
+endif
+ifndef PKGS
+PKGS := $(shell go list ./... 2>&1 | grep -v 'github.com/libopenstorage/openstorage/vendor')
+endif
 ifeq ($(BUILD_TYPE),debug)
 BUILDFLAGS := -gcflags "-N -l"
+endif
+
+ifdef HAVE_BTRFS
+TAGS+=btrfs_noversion have_btrfs
+endif
+
+ifdef HAVE_UNIONFS
+TAGS+=have_unionfs
 endif
 
 export GO15VENDOREXPERIMENT=1
@@ -22,13 +33,11 @@ update-test-deps:
 	GO15VENDOREXPERIMENT=0 go get -d -v -t -u -f $(PKGS)
 
 vendor:
-	go get -v github.com/tools/godep
-	rm -rf Godeps
+	go get -v github.com/kardianos/govendor
 	rm -rf vendor
-	# TODO: when godep fixes downloading all tags, remove the custom package
-	# https://github.com/tools/godep/issues/271
-	godep save $(PKGS) github.com/docker/docker/pkg/chrootarchive
-	rm -rf Godeps
+	govendor init
+	GOOS=linux GOARCH=amd64 govendor add +external
+	GOOS=linux GOARCH=amd64 govendor update +vendor
 
 build:
 	go build -tags "$(TAGS)" $(BUILDFLAGS) $(PKGS)
@@ -45,12 +54,12 @@ vet:
 
 errcheck:
 	go get -v github.com/kisielk/errcheck
-	errcheck $(PKGS)
+	errcheck -tags "$(TAGS)" $(PKGS)
 
 pretest: lint vet errcheck
 
 test:
-	go test -tags "$(TAGS)" $(PKGS)
+	go test -tags "$(TAGS)" $(TESTFLAGS) $(PKGS)
 
 docker-build:
 	docker build -t openstorage/osd-dev -f Dockerfile.osd-dev .
@@ -58,9 +67,13 @@ docker-build:
 docker-test: docker-build
 	docker run \
 		--privileged \
+		-v /var/run/docker.sock:/var/run/docker.sock \
 		-e AWS_ACCESS_KEY_ID \
 		-e AWS_SECRET_ACCESS_KEY \
-		-v /var/run/docker.sock:/var/run/docker.sock \
+		-e "TAGS=$(TAGS)" \
+		-e "PKGS=$(PKGS)" \
+		-e "BUILDFLAGS=$(BUILDFLAGS)" \
+		-e "TESTFLAGS=$(TESTFLAGS)" \
 		openstorage/osd-dev \
 			make test
 
@@ -71,15 +84,21 @@ docker-build-osd-internal:
 	docker build -t openstorage/osd -f Dockerfile.osd .
 
 docker-build-osd: docker-build
-	docker run -v /var/run/docker.sock:/var/run/docker.sock openstorage/osd-dev make docker-build-osd-internal
+	docker run \
+		-v /var/run/docker.sock:/var/run/docker.sock \
+		-e "TAGS=$(TAGS)" \
+		-e "PKGS=$(PKGS)" \
+		-e "BUILDFLAGS=$(BUILDFLAGS)" \
+		openstorage/osd-dev \
+			make docker-build-osd-internal
 
 launch: docker-build-osd
 	docker run \
 		--privileged \
+		-d \
 		-v $(shell pwd):/etc \
-		-v /usr/share/docker/plugins:/usr/share/docker/plugins \
-		-v /var/lib/osd/driver:/var/lib/osd/driver \
-		-v /mnt:/mnt \
+		-v /run/docker/plugins:/run/docker/plugins \
+		-v /var/lib/osd/:/var/lib/osd/\
 		openstorage/osd -d -f /etc/config.yaml
 
 clean:

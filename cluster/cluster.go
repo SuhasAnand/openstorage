@@ -5,25 +5,29 @@ import (
 	"errors"
 
 	"github.com/fsouza/go-dockerclient"
+	"github.com/libopenstorage/gossip/types"
 	"github.com/libopenstorage/openstorage/api"
 
 	"github.com/portworx/kvdb"
 )
 
 var (
-	inst *ClusterManager
+	inst Cluster
 )
 
 type Config struct {
 	ClusterId string
 	NodeId    string
+	MgtIface  string
+	DataIface string
 }
 
 // NodeEntry is used to discover other nodes in the cluster
 // and setup the gossip protocol with them.
 type NodeEntry struct {
-	Id string
-	Ip string
+	Id        string
+	Ip        string
+	GenNumber uint64
 }
 
 type Database struct {
@@ -46,6 +50,9 @@ type ClusterListener interface {
 	// Init is called when this node is joining an existing cluster for the first time.
 	Init(self *api.Node, db *Database) error
 
+	// CleanupInit is called when Init failed.
+	CleanupInit(self *api.Node, db *Database) error
+
 	// Join is called when this node is joining an existing cluster.
 	Join(self *api.Node, db *Database) error
 
@@ -61,6 +68,29 @@ type ClusterListener interface {
 
 	// Leave is called when this node leaves the cluster.
 	Leave(node *api.Node) error
+}
+
+type ClusterState struct {
+	History    []*types.GossipSessionInfo
+	NodeStatus []types.NodeValue
+}
+
+type ClusterData interface {
+	// Update node data associated with this node
+	UpdateData(dataKey string, value interface{})
+
+	// Get data associated with all nodes.
+	// Key is the node id
+	GetData() map[string]*api.Node
+
+	// Enables cluster data updates to be sent to listeners
+	EnableUpdates()
+
+	// Disables cluster data updates to be sent to listeners
+	DisableUpdates()
+
+	// Status of nodes according to gossip
+	GetState() *ClusterState
 }
 
 // Cluster is the API that a cluster provider will implement.
@@ -84,15 +114,11 @@ type Cluster interface {
 	// It also causes this node to join the cluster.
 	Start() error
 
-	// Enables notifications from gossip
-	EnableGossipUpdates()
-
-	// Disable notifications from gossip
-	DisableGossipUpdates()
+	ClusterData
 }
 
 // New instantiates and starts a new cluster manager.
-func New(cfg Config, kv kvdb.Kvdb, dockerClient *docker.Client) *ClusterManager {
+func New(cfg Config, kv kvdb.Kvdb, dockerClient *docker.Client) Cluster {
 	inst = &ClusterManager{
 		listeners: list.New(),
 		config:    cfg,
@@ -119,7 +145,7 @@ func Start() error {
 }
 
 // Inst returns an instance of an already instantiated cluster manager.
-func Inst() (*ClusterManager, error) {
+func Inst() (Cluster, error) {
 	if inst == nil {
 		return nil, errors.New("Cluster is not initialized.")
 	}

@@ -1,4 +1,4 @@
-// +build linux
+// +build linux,have_btrfs
 
 package btrfs
 
@@ -8,16 +8,14 @@ import (
 	"syscall"
 	"time"
 
-	log "github.com/Sirupsen/logrus"
-	graph "github.com/docker/docker/daemon/graphdriver"
+	"github.com/Sirupsen/logrus"
+	"github.com/docker/docker/daemon/graphdriver"
 	"github.com/docker/docker/daemon/graphdriver/btrfs"
-	"github.com/pborman/uuid"
-
-	"github.com/portworx/kvdb"
-
 	"github.com/libopenstorage/openstorage/api"
 	"github.com/libopenstorage/openstorage/pkg/chaos"
 	"github.com/libopenstorage/openstorage/volume"
+	"github.com/pborman/uuid"
+	"github.com/portworx/kvdb"
 )
 
 const (
@@ -33,9 +31,10 @@ var (
 )
 
 type driver struct {
+	*volume.IoNotSupported
 	*volume.DefaultBlockDriver
 	*volume.DefaultEnumerator
-	btrfs graph.Driver
+	btrfs graphdriver.Driver
 	root  string
 }
 
@@ -50,7 +49,11 @@ func Init(params volume.DriverParams) (volume.VolumeDriver, error) {
 		return nil, err
 	}
 	s := volume.NewDefaultEnumerator(Name, kvdb.Instance())
-	return &driver{btrfs: d, root: root, DefaultEnumerator: s}, nil
+	return &driver{
+		btrfs:             d,
+		root:              root,
+		IoNotSupported:    &volume.IoNotSupported{},
+		DefaultEnumerator: s}, nil
 }
 
 func (d *driver) String() string {
@@ -93,7 +96,7 @@ func (d *driver) Create(locator api.VolumeLocator,
 	if err != nil {
 		return api.BadVolumeID, err
 	}
-	err = d.btrfs.Create(volumeID, "")
+	err = d.btrfs.Create(volumeID, "", "")
 	if err != nil {
 		return api.BadVolumeID, err
 	}
@@ -109,7 +112,7 @@ func (d *driver) Create(locator api.VolumeLocator,
 func (d *driver) Delete(volumeID api.VolumeID) error {
 	err := d.DeleteVol(volumeID)
 	if err != nil {
-		log.Println(err)
+		logrus.Println(err)
 		return err
 	}
 
@@ -124,7 +127,7 @@ func (d *driver) Delete(volumeID api.VolumeID) error {
 func (d *driver) Mount(volumeID api.VolumeID, mountpath string) error {
 	v, err := d.GetVol(volumeID)
 	if err != nil {
-		log.Println(err)
+		logrus.Println(err)
 		return err
 	}
 	err = syscall.Mount(v.DevicePath, mountpath, string(v.Format), syscall.MS_BIND, "")
@@ -191,7 +194,7 @@ func (d *driver) Snapshot(volumeID api.VolumeID, readonly bool, locator api.Volu
 		return api.BadVolumeID, err
 	}
 	chaos.Now(koStrayCreate)
-	err = d.btrfs.Create(snapID, string(volumeID))
+	err = d.btrfs.Create(snapID, string(volumeID), "")
 	if err != nil {
 		return api.BadVolumeID, err
 	}

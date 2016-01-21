@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -92,9 +93,9 @@ func (d *graphDriver) decode(method string, w http.ResponseWriter, r *http.Reque
 		return nil, err
 	}
 	if len(request.Parent) != 0 {
-		d.logReq(method, request.ID).Info("Parent: ", request.Parent)
+		d.logReq(method, request.ID).Debug("Parent: ", request.Parent)
 	} else {
-		d.logReq(method, request.ID).Info("")
+		d.logReq(method, request.ID).Debug("")
 	}
 	return &request, nil
 }
@@ -123,10 +124,13 @@ func (d *graphDriver) init(w http.ResponseWriter, r *http.Request) {
 		d.decodeError(method, w, err)
 		return
 	}
-	gd, err := graph.New(d.name, config.GraphDriverAPIBase, request.Opts)
+	gd, err := graph.Get(d.name)
 	if err != nil {
-		d.errResponse(method, w, err)
-		return
+		gd, err = graph.New(d.name, config.GraphDriverAPIBase, request.Opts)
+		if err != nil {
+			d.errResponse(method, w, err)
+			return
+		}
 	}
 	d.gd = gd
 	d.emptyResponse(w)
@@ -134,11 +138,16 @@ func (d *graphDriver) init(w http.ResponseWriter, r *http.Request) {
 
 func (d *graphDriver) create(w http.ResponseWriter, r *http.Request) {
 	method := "create"
+	if d.gd == nil {
+		d.errResponse(method, w, errors.New("Graph driver not yet initialized."))
+		return
+	}
+
 	request, err := d.decode(method, w, r)
 	if err != nil {
 		return
 	}
-	if err := d.gd.Create(request.ID, request.Parent); err != nil {
+	if err := d.gd.Create(request.ID, request.Parent, ""); err != nil {
 		d.errResponse(method, w, err)
 		return
 	}
@@ -147,6 +156,11 @@ func (d *graphDriver) create(w http.ResponseWriter, r *http.Request) {
 
 func (d *graphDriver) remove(w http.ResponseWriter, r *http.Request) {
 	method := "remove"
+	if d.gd == nil {
+		d.errResponse(method, w, errors.New("Graph driver not yet initialized."))
+		return
+	}
+
 	request, err := d.decode(method, w, r)
 	if err != nil {
 		return
@@ -161,6 +175,11 @@ func (d *graphDriver) remove(w http.ResponseWriter, r *http.Request) {
 func (d *graphDriver) get(w http.ResponseWriter, r *http.Request) {
 	var response graphResponse
 	method := "get"
+	if d.gd == nil {
+		d.errResponse(method, w, errors.New("Graph driver not yet initialized."))
+		return
+	}
+
 	request, err := d.decode(method, w, r)
 	if err != nil {
 		return
@@ -176,6 +195,11 @@ func (d *graphDriver) get(w http.ResponseWriter, r *http.Request) {
 func (d *graphDriver) put(w http.ResponseWriter, r *http.Request) {
 	method := "put"
 	request, err := d.decode(method, w, r)
+	if d.gd == nil {
+		d.errResponse(method, w, errors.New("Graph driver not yet initialized."))
+		return
+	}
+
 	if err != nil {
 		return
 	}
@@ -190,6 +214,11 @@ func (d *graphDriver) put(w http.ResponseWriter, r *http.Request) {
 func (d *graphDriver) exists(w http.ResponseWriter, r *http.Request) {
 	var response graphResponse
 	method := "put"
+	if d.gd == nil {
+		d.errResponse(method, w, errors.New("Graph driver not yet initialized."))
+		return
+	}
+
 	request, err := d.decode(method, w, r)
 	if err != nil {
 		return
@@ -207,6 +236,11 @@ func (d *graphDriver) graphStatus(w http.ResponseWriter, r *http.Request) {
 func (d *graphDriver) getMetadata(w http.ResponseWriter, r *http.Request) {
 	var response graphResponse
 	method := "getMetadata"
+	if d.gd == nil {
+		d.errResponse(method, w, errors.New("Graph driver not yet initialized."))
+		return
+	}
+
 	request, err := d.decode(method, w, r)
 	if err != nil {
 		return
@@ -221,6 +255,11 @@ func (d *graphDriver) getMetadata(w http.ResponseWriter, r *http.Request) {
 
 func (d *graphDriver) cleanup(w http.ResponseWriter, r *http.Request) {
 	method := "cleanup"
+	if d.gd == nil {
+		d.errResponse(method, w, errors.New("Graph driver not yet initialized."))
+		return
+	}
+
 	err := d.gd.Cleanup()
 	if err != nil {
 		d.errResponse(method, w, err)
@@ -231,6 +270,11 @@ func (d *graphDriver) cleanup(w http.ResponseWriter, r *http.Request) {
 
 func (d *graphDriver) diff(w http.ResponseWriter, r *http.Request) {
 	method := "diff"
+	if d.gd == nil {
+		d.errResponse(method, w, errors.New("Graph driver not yet initialized."))
+		return
+	}
+
 	request, err := d.decode(method, w, r)
 	if err != nil {
 		return
@@ -245,6 +289,11 @@ func (d *graphDriver) diff(w http.ResponseWriter, r *http.Request) {
 
 func (d *graphDriver) changes(w http.ResponseWriter, r *http.Request) {
 	method := "changes"
+	if d.gd == nil {
+		d.errResponse(method, w, errors.New("Graph driver not yet initialized."))
+		return
+	}
+
 	request, err := d.decode(method, w, r)
 	if err != nil {
 		return
@@ -259,9 +308,14 @@ func (d *graphDriver) changes(w http.ResponseWriter, r *http.Request) {
 
 func (d *graphDriver) applyDiff(w http.ResponseWriter, r *http.Request) {
 	method := "applyDiff"
+	if d.gd == nil {
+		d.errResponse(method, w, errors.New("Graph driver not yet initialized."))
+		return
+	}
+
 	id := r.URL.Query().Get("id")
 	parent := r.URL.Query().Get("parent")
-	d.logReq(method, id).Infof("Parent %v", parent)
+	d.logReq(method, id).Debugf("Parent %v", parent)
 	size, err := d.gd.ApplyDiff(id, parent, r.Body)
 	if err != nil {
 		d.errResponse(method, w, err)
@@ -272,6 +326,11 @@ func (d *graphDriver) applyDiff(w http.ResponseWriter, r *http.Request) {
 
 func (d *graphDriver) diffSize(w http.ResponseWriter, r *http.Request) {
 	method := "diffSize"
+	if d.gd == nil {
+		d.errResponse(method, w, errors.New("Graph driver not yet initialized."))
+		return
+	}
+
 	request, err := d.decode(method, w, r)
 	if err != nil {
 		return

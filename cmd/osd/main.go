@@ -11,14 +11,18 @@ import (
 	"github.com/fsouza/go-dockerclient"
 
 	"github.com/portworx/kvdb"
+	"github.com/portworx/kvdb/consul"
 	"github.com/portworx/kvdb/etcd"
 	"github.com/portworx/kvdb/mem"
 
+	"github.com/Sirupsen/logrus"
+
 	"github.com/libopenstorage/openstorage/api"
-	apiserver "github.com/libopenstorage/openstorage/api/server"
+	"github.com/libopenstorage/openstorage/api/server"
 	osdcli "github.com/libopenstorage/openstorage/cli"
 	"github.com/libopenstorage/openstorage/cluster"
 	"github.com/libopenstorage/openstorage/config"
+	"github.com/libopenstorage/openstorage/graph/drivers"
 	"github.com/libopenstorage/openstorage/volume"
 	"github.com/libopenstorage/openstorage/volume/drivers"
 )
@@ -28,24 +32,24 @@ const (
 )
 
 func start(c *cli.Context) {
-	var cm *cluster.ClusterManager
+	var cm cluster.Cluster
 
 	if !osdcli.DaemonMode(c) {
 		cli.ShowAppHelp(c)
 		return
 	}
 
-	datastores := []string{mem.Name, etcd.Name}
+	datastores := []string{mem.Name, etcd.Name, consul.Name}
 
 	// We are in daemon mode.
 	file := c.String("file")
 	if file == "" {
-		fmt.Println("OSD configuration file not specified.  Visit openstorage.org for an example.")
+		logrus.Warn("OSD configuration file not specified.  Visit openstorage.org for an example.")
 		return
 	}
 	cfg, err := config.Parse(file)
 	if err != nil {
-		fmt.Println(err)
+		logrus.Error(err)
 		return
 	}
 	kvdbURL := c.String("kvdb")
@@ -55,13 +59,13 @@ func start(c *cli.Context) {
 
 	kv, err := kvdb.New(scheme, "openstorage", []string{u.String()}, nil)
 	if err != nil {
-		fmt.Println("Failed to initialize KVDB: ", u.Scheme, err)
-		fmt.Println("Supported datastores: ", datastores)
+		logrus.Warnf("Failed to initialize KVDB: %v (%v)", scheme, err)
+		logrus.Warnf("Supported datastores: %v", datastores)
 		return
 	}
 	err = kvdb.SetInstance(kv)
 	if err != nil {
-		fmt.Println("Failed to initialize KVDB: ", err)
+		logrus.Warnf("Failed to initialize KVDB: %v", err)
 		return
 	}
 
@@ -69,7 +73,7 @@ func start(c *cli.Context) {
 	if cfg.Osd.ClusterConfig.NodeId != "" && cfg.Osd.ClusterConfig.ClusterId != "" {
 		dockerClient, err := docker.NewClientFromEnv()
 		if err != nil {
-			fmt.Println("Failed to initialize docker client: ", err)
+			logrus.Warnf("Failed to initialize docker client: %v", err)
 			return
 		}
 		cm = cluster.New(cfg.Osd.ClusterConfig, kv, dockerClient)
@@ -77,30 +81,30 @@ func start(c *cli.Context) {
 
 	// Start the volume drivers.
 	for d, v := range cfg.Osd.Drivers {
-		fmt.Println("Starting volume driver: ", d)
+		logrus.Infof("Starting volume driver: %v", d)
 		_, err := volume.New(d, v)
 		if err != nil {
-			fmt.Println("Unable to start volume driver: ", d, err)
+			logrus.Warnf("Unable to start volume driver: %v, %v", d, err)
 			return
 		}
-		err = apiserver.StartServerAPI(d, 0, config.DriverAPIBase)
+		err = server.StartServerAPI(d, 0, config.DriverAPIBase)
 		if err != nil {
-			fmt.Println("Unable to start volume driver: ", err)
+			logrus.Warnf("Unable to start volume driver: %v", err)
 			return
 		}
-		err = apiserver.StartPluginAPI(d, config.PluginAPIBase)
+		err = server.StartPluginAPI(d, config.PluginAPIBase)
 		if err != nil {
-			fmt.Println("Unable to start volume plugin: ", err)
+			logrus.Warnf("Unable to start volume plugin: %v", err)
 			return
 		}
 	}
 
 	// Start the graph drivers.
 	for d, _ := range cfg.Osd.GraphDrivers {
-		fmt.Println("Starting graph driver: ", d)
-		err = apiserver.StartGraphAPI(d, 0, config.PluginAPIBase)
+		logrus.Infof("Starting graph driver: %v", d)
+		err = server.StartGraphAPI(d, 0, config.PluginAPIBase)
 		if err != nil {
-			fmt.Println("Unable to start graph plugin: ", err)
+			logrus.Warnf("Unable to start graph plugin: %v", err)
 			return
 		}
 	}
@@ -108,7 +112,7 @@ func start(c *cli.Context) {
 	if cm != nil {
 		err = cm.Start()
 		if err != nil {
-			fmt.Println("Unable to start cluster manager: ", err)
+			logrus.Warnf("Unable to start cluster manager: %v", err)
 			return
 		}
 	}
@@ -143,12 +147,12 @@ func main() {
 		},
 		cli.StringSliceFlag{
 			Name:  "driver",
-			Usage: "driver name and options: name=btrfs,root_vol=/var/openstorage/btrfs",
+			Usage: "driver name and options: name=btrfs,home=/var/openstorage/btrfs",
 			Value: new(cli.StringSlice),
 		},
 		cli.StringFlag{
 			Name:  "kvdb,k",
-			Usage: "uri to kvdb e.g. kv-mem://localhost, etcd://localhost:4001",
+			Usage: "uri to kvdb e.g. kv-mem://localhost, etcd-kv://localhost:4001, consul-kv://localhost:8500",
 			Value: "kv-mem://localhost",
 		},
 		cli.StringFlag{
@@ -174,8 +178,8 @@ func main() {
 		},
 	}
 
-	// Start all drivers.
-	for _, v := range drivers.AllDrivers {
+	// Register all volume drivers with the CLI.
+	for _, v := range volumedrivers.AllDrivers {
 		if v.DriverType&api.Block == api.Block {
 			bCmds := osdcli.BlockVolumeCommands(v.Name)
 			clstrCmds := osdcli.ClusterCommands(v.Name)
@@ -197,9 +201,18 @@ func main() {
 			}
 			app.Commands = append(app.Commands, c)
 		}
+	}
 
+	// Register all graph drivers with the CLI.
+	for _, v := range graphdrivers.AllDrivers {
 		if v.DriverType&api.Graph == api.Graph {
-			// TODO - register this as a graph driver with Docker.
+			cmds := osdcli.GraphDriverCommands(v.Name)
+			c := cli.Command{
+				Name:        v.Name,
+				Usage:       fmt.Sprintf("Manage %s graph storage", v.Name),
+				Subcommands: cmds,
+			}
+			app.Commands = append(app.Commands, c)
 		}
 	}
 

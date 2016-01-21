@@ -1,22 +1,74 @@
 package proto
 
 import (
+	"container/list"
 	"errors"
 	log "github.com/Sirupsen/logrus"
+	"github.com/libopenstorage/gossip/types"
 	"math"
 	"math/rand"
 	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/libopenstorage/gossip/types"
 )
 
 const (
 	DEFAULT_GOSSIP_INTERVAL     = 2 * time.Second
 	DEFAULT_NODE_DEATH_INTERVAL = 15 * DEFAULT_GOSSIP_INTERVAL
 )
+
+type GossipHistory struct {
+	// front is the latest, back is the last
+	nodes  *list.List
+	lock   sync.Mutex
+	maxLen uint8
+}
+
+func NewGossipSessionInfo(node string,
+	dir types.GossipDirection) *types.GossipSessionInfo {
+	gs := new(types.GossipSessionInfo)
+	gs.Node = node
+	gs.Dir = dir
+	gs.Ts = time.Now()
+	gs.Err = ""
+	return gs
+}
+
+func NewGossipHistory(maxLen uint8) *GossipHistory {
+	s := new(GossipHistory)
+	s.nodes = list.New()
+	s.nodes.Init()
+	s.maxLen = maxLen
+	return s
+}
+
+func (s *GossipHistory) AddLatest(gs *types.GossipSessionInfo) {
+	s.lock.Lock()
+	defer s.lock.Unlock()
+	if uint8(s.nodes.Len()) == s.maxLen {
+		s.nodes.Remove(s.nodes.Back())
+	}
+	s.nodes.PushFront(gs)
+}
+
+func (s *GossipHistory) GetAllRecords() []*types.GossipSessionInfo {
+	s.lock.Lock()
+	defer s.lock.Unlock()
+	records := make([]*types.GossipSessionInfo, s.nodes.Len(), s.nodes.Len())
+	i := 0
+	for element := s.nodes.Front(); element != nil; element = element.Next() {
+		r, ok := element.Value.(*types.GossipSessionInfo)
+		if !ok || r == nil {
+			log.Error("Failed to convert element")
+			continue
+		}
+		records[i] = &types.GossipSessionInfo{Node: r.Node,
+			Ts: r.Ts, Dir: r.Dir, Err: r.Err}
+		i++
+	}
+	return records
+}
 
 // Implements the UnreliableBroadcast interface
 type GossiperImpl struct {
@@ -34,6 +86,7 @@ type GossiperImpl struct {
 	gossipInterval    time.Duration
 	nodeDeathInterval time.Duration
 	peerSelector      PeerSelector
+	history           *GossipHistory
 }
 
 // Utility methods
@@ -93,9 +146,10 @@ func NewPeerSelector() PeerSelector {
 	return s
 }
 
-func (g *GossiperImpl) Init(ip string, selfNodeId types.NodeId) {
+func (g *GossiperImpl) Init(ip string, selfNodeId types.NodeId, genNumber uint64) {
 	g.InitStore(selfNodeId)
 	g.name = ip
+	g.GenNumber = genNumber
 	g.nodes = make([]string, 0)
 	g.send_done = make(chan bool, 1)
 	g.rcv_done = make(chan bool, 1)
@@ -103,6 +157,7 @@ func (g *GossiperImpl) Init(ip string, selfNodeId types.NodeId) {
 	g.gossipInterval = DEFAULT_GOSSIP_INTERVAL
 	g.nodeDeathInterval = DEFAULT_NODE_DEATH_INTERVAL
 	g.peerSelector = NewPeerSelector()
+	g.history = NewGossipHistory(20)
 	rand.Seed(time.Now().UnixNano())
 }
 
@@ -144,7 +199,11 @@ func (g *GossiperImpl) NodeDeathInterval() time.Duration {
 	return g.nodeDeathInterval
 }
 
-func (g *GossiperImpl) AddNode(ip string) error {
+func (g *GossiperImpl) GetGossipHistory() []*types.GossipSessionInfo {
+	return g.history.GetAllRecords()
+}
+
+func (g *GossiperImpl) AddNode(ip string, id types.NodeId) error {
 	g.nodesLock.Lock()
 	defer g.nodesLock.Unlock()
 
@@ -203,7 +262,7 @@ func (g *GossiperImpl) GetNodes() []string {
 // for which the peer has more latest information available
 func (g *GossiperImpl) getUpdatesFromPeer(conn types.MessageChannel) error {
 
-	var newPeerData types.StoreDiff
+	var newPeerData types.NodeInfoMap
 	err := conn.RcvData(&newPeerData)
 	if err != nil {
 		log.Error("Error fetching the latest peer data", err)
@@ -289,7 +348,8 @@ func (g *GossiperImpl) sendLoop() {
 	for {
 		select {
 		case <-tick:
-			g.gossip()
+			gs := g.gossip()
+			g.history.AddLatest(gs)
 		case <-g.send_done:
 			return
 		}
@@ -303,7 +363,7 @@ func (g *GossiperImpl) updateStatusLoop() {
 	for {
 		select {
 		case <-tick:
-			g.UpdateNodeStatuses(g.nodeDeathInterval)
+			g.UpdateNodeStatuses(g.nodeDeathInterval, 4*g.nodeDeathInterval)
 		case <-g.update_done:
 			return
 		}
@@ -328,53 +388,55 @@ func (g *GossiperImpl) selectGossipPeer() string {
 	return g.nodes[peer]
 }
 
-func (g *GossiperImpl) gossip() {
+func (g *GossiperImpl) gossip() *types.GossipSessionInfo {
 
 	// select a node to gossip with
 	peerNode := g.selectGossipPeer()
 	if len(peerNode) == 0 {
-		return
+		return nil
 	}
 	log.Debug("Starting gossip with ", peerNode)
 
+	gs := NewGossipSessionInfo(peerNode, types.GD_ME_TO_PEER)
+
 	conn := NewMessageChannel(peerNode)
 	if conn == nil {
-		//XXX: FIXME : note that the peer is down
-		return
+		gs.Err = "Could not connect to host"
+		return gs
 	}
 
 	// send meta data info about the node to the peer
 	err := g.sendNodeMetaInfo(conn)
 	if err != nil {
-		log.Error("Failed to send meta info to the peer: ", err)
-		//XXX: FIXME : note that the peer is down
-		return
+		gs.Err = "Failed to send meta info to the peer"
+		log.Error(gs.Err)
+		return gs
 	}
 
 	// get a list of requested nodes from the peer and
 	var diff types.StoreNodes
 	err = conn.RcvData(&diff)
 	if err != nil {
-		log.Error("Failed to get request info to the peer: ", err)
-		//XXX: FIXME : note that the peer is down
-		return
+		gs.Err = "Failed to get request info to the peer"
+		log.Error(gs.Err)
+		return gs
 	}
 
 	// send back the data
 	err = g.sendUpdatesToPeer(&diff, conn)
 	if err != nil {
-		log.Error("Failed to send newer data to the peer: ", err)
-		//XXX: FIXME : note that the peer is down
-		return
+		gs.Err = "Failed to send newer data to the peer"
+		log.Error(gs.Err)
+		return gs
 	}
 
 	// receive any updates the send has for us
 	err = g.getUpdatesFromPeer(conn)
 	if err != nil {
-		log.Error("Failed to get newer data from the peer: ", err)
-		//XXX: FIXME : note that the peer is down
-		return
+		gs.Err = "Failed to get newer data from the peer"
+		log.Error(gs.Err)
+		return gs
 	}
 	log.Debug("Ending gossip with ", peerNode)
-
+	return gs
 }

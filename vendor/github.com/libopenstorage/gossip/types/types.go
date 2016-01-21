@@ -9,20 +9,51 @@ type NodeId string
 type StoreKey string
 type NodeStatus uint8
 type NodeInfoMap map[NodeId]NodeInfo
+type NodeValueMap map[NodeId]NodeValue
+type StoreMap map[StoreKey]interface{}
 
 const (
 	NODE_STATUS_INVALID NodeStatus = iota
 	NODE_STATUS_UP
 	NODE_STATUS_DOWN
+	NODE_STATUS_NEVER_GOSSIPED
+	NODE_STATUS_WAITING_FOR_NEW_UPDATE
+	NODE_STATUS_DOWN_WAITING_FOR_NEW_UPDATE
 )
+
+type GossipDirection uint8
+
+const (
+	// Direction of gossip
+	GD_ME_TO_PEER GossipDirection = iota
+	GD_PEER_TO_ME
+)
+
+type GossipSessionInfo struct {
+	Node string
+	Ts   time.Time
+	Dir  GossipDirection
+	Err  string
+}
 
 type NodeMetaInfo struct {
 	Id           NodeId
+	GenNumber    uint64
 	LastUpdateTs time.Time
 }
 
 type NodeInfo struct {
+	Id                 NodeId
+	GenNumber          uint64
+	LastUpdateTs       time.Time
+	WaitForGenUpdateTs time.Time
+	Status             NodeStatus
+	Value              StoreMap
+}
+
+type NodeValue struct {
 	Id           NodeId
+	GenNumber    uint64
 	LastUpdateTs time.Time
 	Status       NodeStatus
 	Value        interface{}
@@ -33,24 +64,9 @@ func (n NodeInfo) String() string {
 		n.Id, n.LastUpdateTs, n.Status, n.Value)
 }
 
-type NodeInfoList struct {
-	List []NodeInfo
-}
-
-type NodeMetaInfoList struct {
-	List []NodeMetaInfo
-}
-
-// StoreValue is a map where the key is the
-// StoreKey and the value is the NodeInfoList.
-// This list gives the latest available view with this node
-// for the whole system
-type StoreValue map[StoreKey]NodeInfoList
-
 // Used by the Gossip protocol
-type StoreMetaInfo map[StoreKey]NodeMetaInfoList
-type StoreDiff map[StoreKey]map[NodeId]NodeInfo
-type StoreNodes map[StoreKey][]NodeId
+type StoreMetaInfo map[NodeId]NodeMetaInfo
+type StoreNodes []NodeId
 
 // OnMessageRcv is a handler that is invoked when
 // message arrives on the message channel.

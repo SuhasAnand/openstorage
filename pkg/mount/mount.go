@@ -8,7 +8,7 @@ import (
 	"sync"
 	"syscall"
 
-	log "github.com/Sirupsen/logrus"
+	"github.com/Sirupsen/logrus"
 )
 
 // Mangager defines the interface for keep track of volume driver mounts.
@@ -41,6 +41,8 @@ const (
 )
 
 var (
+	// ErrExist is returned if path is already mounted to a different device.
+	ErrExist = errors.New("Mountpath already exists")
 	// ErrEnoent is returned for a non existent mount point
 	ErrEnoent = errors.New("Mountpath is not mounted")
 	// ErrEinval is returned is fields for an entry do no match
@@ -52,6 +54,9 @@ var (
 
 // DeviceMap map device name to Info
 type DeviceMap map[string]*Info
+
+// PathMap map path name to device
+type PathMap map[string]string
 
 // PathInfo is a reference counted path
 type PathInfo struct {
@@ -71,6 +76,7 @@ type Info struct {
 type Mounter struct {
 	sync.Mutex
 	mounts DeviceMap
+	paths  PathMap
 }
 
 // String representation of Mounter
@@ -125,6 +131,11 @@ func (m *Mounter) Mount(minor int, device, path, fs string, flags uintptr, data 
 	m.Lock()
 	defer m.Unlock()
 
+	dev, ok := m.paths[path]
+	if ok && dev != device {
+		logrus.Warnf("cannot mount %q,  device %q is mounted at %q", device, dev, path)
+		return ErrExist
+	}
 	info, ok := m.mounts[device]
 	if !ok {
 		info = &Info{
@@ -137,7 +148,7 @@ func (m *Mounter) Mount(minor int, device, path, fs string, flags uintptr, data 
 
 	// Validate input params
 	if fs != info.Fs {
-		log.Warnf("%s Existing mountpoint has fs %q cannot change to %q",
+		logrus.Warnf("%s Existing mountpoint has fs %q cannot change to %q",
 			device, info.Fs, fs)
 		return ErrEinval
 	}
@@ -156,6 +167,7 @@ func (m *Mounter) Mount(minor int, device, path, fs string, flags uintptr, data 
 	}
 	info.Mountpoint = append(info.Mountpoint, PathInfo{Path: path, ref: 1})
 	m.mounts[device] = info
+	m.paths[path] = device
 	return nil
 }
 
@@ -178,6 +190,11 @@ func (m *Mounter) Unmount(device, path string) error {
 				err := syscall.Unmount(path, 0)
 				if err != nil {
 					return err
+				}
+				if _, pathExists := m.paths[path]; pathExists {
+					delete(m.paths, path)
+				} else {
+					logrus.Warnf("Path %q for device %q does not exist in pathMap", path, device)
 				}
 				// Blow away this mountpoint.
 				info.Mountpoint[i] = info.Mountpoint[len(info.Mountpoint)-1]

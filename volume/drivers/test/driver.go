@@ -8,14 +8,12 @@ import (
 	"testing"
 	"time"
 
-	log "github.com/Sirupsen/logrus"
-	"github.com/stretchr/testify/assert"
-
-	"github.com/portworx/kvdb"
-	"github.com/portworx/kvdb/mem"
-
+	"github.com/Sirupsen/logrus"
 	"github.com/libopenstorage/openstorage/api"
 	"github.com/libopenstorage/openstorage/volume"
+	"github.com/portworx/kvdb"
+	"github.com/portworx/kvdb/mem"
+	"github.com/stretchr/testify/assert"
 )
 
 // Context maintains current device state. It gets passed into tests
@@ -206,6 +204,26 @@ func mount(t *testing.T, ctx *Context) {
 	ctx.mountPath = ctx.testPath
 }
 
+func multiMount(t *testing.T, ctx *Context) {
+	ctx2 := *ctx
+	create(t, ctx)
+	attach(t, ctx)
+	mount(t, ctx)
+
+	create(t, &ctx2)
+	attach(t, &ctx2)
+
+	err := ctx2.Mount(ctx2.volID, ctx2.testPath)
+	assert.Error(t, err, "Mount of different devices to same path must fail")
+
+	unmount(t, ctx)
+	detach(t, ctx)
+	delete(t, ctx)
+
+	detach(t, &ctx2)
+	delete(t, &ctx2)
+}
+
 func unmount(t *testing.T, ctx *Context) {
 	fmt.Println("unmount")
 
@@ -325,10 +343,10 @@ func snapDelete(t *testing.T, ctx *Context) {
 func init() {
 	kv, err := kvdb.New(mem.Name, "driver_test", []string{}, nil)
 	if err != nil {
-		log.Panicf("Failed to intialize KVDB")
+		logrus.Panicf("Failed to intialize KVDB")
 	}
 	err = kvdb.SetInstance(kv)
 	if err != nil {
-		log.Panicf("Failed to set KVDB instance")
+		logrus.Panicf("Failed to set KVDB instance")
 	}
 }

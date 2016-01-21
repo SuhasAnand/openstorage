@@ -40,6 +40,13 @@ func (c *clusterClient) AddEventListener(cluster.ClusterListener) error {
 	return nil
 }
 
+func (c *clusterClient) UpdateData(dataKey string, value interface{}) {
+}
+
+func (c *clusterClient) GetData() map[string]*api.Node {
+	return nil
+}
+
 func (c *clusterClient) Remove(nodes []api.Node) error {
 	return nil
 }
@@ -52,10 +59,17 @@ func (c *clusterClient) Start() error {
 	return nil
 }
 
-func (c *clusterClient) DisableGossipUpdates() {
+func (c *clusterClient) DisableUpdates() {
 	c.c.Post().Resource(clusterPath + "/disablegossip").Do()
 }
 
-func (c *clusterClient) EnableGossipUpdates() {
+func (c *clusterClient) EnableUpdates() {
 	c.c.Post().Resource(clusterPath + "/enablegossip").Do()
+}
+
+func (c *clusterClient) GetState() *cluster.ClusterState {
+	var status *cluster.ClusterState
+
+	c.c.Get().Resource(clusterPath + "/gossipstatus").Do().Unmarshal(&status)
+	return status
 }

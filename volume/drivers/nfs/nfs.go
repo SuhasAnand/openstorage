@@ -10,16 +10,14 @@ import (
 	"syscall"
 	"time"
 
-	log "github.com/Sirupsen/logrus"
-	"github.com/pborman/uuid"
-
-	"github.com/portworx/kvdb"
-
+	"github.com/Sirupsen/logrus"
 	"github.com/libopenstorage/openstorage/api"
 	"github.com/libopenstorage/openstorage/config"
 	"github.com/libopenstorage/openstorage/pkg/mount"
 	"github.com/libopenstorage/openstorage/pkg/seed"
 	"github.com/libopenstorage/openstorage/volume"
+	"github.com/pborman/uuid"
+	"github.com/portworx/kvdb"
 )
 
 const (
@@ -32,6 +30,7 @@ const (
 
 // Implements the open storage volume interface.
 type driver struct {
+	*volume.IoNotSupported
 	*volume.DefaultEnumerator
 	nfsServer string
 	nfsPath   string
@@ -115,19 +114,20 @@ func Init(params volume.DriverParams) (volume.VolumeDriver, error) {
 
 	server, ok := params["server"]
 	if !ok {
-		log.Printf("No NFS server provided, will attempt to bind mount %s", path)
+		logrus.Printf("No NFS server provided, will attempt to bind mount %s", path)
 	} else {
-		log.Printf("NFS driver initializing with %s:%s ", server, path)
+		logrus.Printf("NFS driver initializing with %s:%s ", server, path)
 	}
 
 	// Create a mount manager for this NFS server. Blank sever is OK.
 	mounter, err := mount.New(mount.NFSMount, server)
 	if err != nil {
-		log.Warnf("Failed to create mount manager for server: %v (%v)", server, err)
+		logrus.Warnf("Failed to create mount manager for server: %v (%v)", server, err)
 		return nil, err
 	}
 
 	inst := &driver{
+		IoNotSupported:    &volume.IoNotSupported{},
 		DefaultEnumerator: volume.NewDefaultEnumerator(Name, kvdb.Instance()),
 		nfsServer:         server,
 		nfsPath:           path,
@@ -138,6 +138,7 @@ func Init(params volume.DriverParams) (volume.VolumeDriver, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	src := inst.nfsPath
 	if server != "" {
 		src = ":" + inst.nfsPath
@@ -154,14 +155,12 @@ func Init(params volume.DriverParams) (volume.VolumeDriver, error) {
 			err = syscall.Mount(src, nfsMountPath, "", syscall.MS_BIND, "")
 		}
 		if err != nil {
-			log.Printf("Unable to mount %s:%s at %s (%+v)", inst.nfsServer, inst.nfsPath, nfsMountPath, err)
+			logrus.Printf("Unable to mount %s:%s at %s (%+v)", inst.nfsServer, inst.nfsPath, nfsMountPath, err)
 			return nil, err
 		}
 	}
 
-	volumeInfo, err := inst.DefaultEnumerator.Enumerate(
-		api.VolumeLocator{},
-		nil)
+	volumeInfo, err := inst.DefaultEnumerator.Enumerate(api.VolumeLocator{}, nil)
 	if err == nil {
 		for _, info := range volumeInfo {
 			if info.Status == "" {
@@ -170,10 +169,10 @@ func Init(params volume.DriverParams) (volume.VolumeDriver, error) {
 			}
 		}
 	} else {
-		log.Println("Could not enumerate Volumes, ", err)
+		logrus.Println("Could not enumerate Volumes, ", err)
 	}
 
-	log.Println("NFS initialized and driver mounted at: ", nfsMountPath)
+	logrus.Println("NFS initialized and driver mounted at: ", nfsMountPath)
 	return inst, nil
 }
 
@@ -191,60 +190,6 @@ func (d *driver) Status() [][2]string {
 }
 
 //
-// These functions below implement the graph driver interface.
-//
-
-// Create a new, empty, filesystem layer with the specified ID and Parent. Parent may be an empty string,
-// which would indicate that there is no parent layer.
-func (d *driver) GraphDriverCreate(id, parent string) error {
-	return nil
-}
-
-// Remove the filesystem layer with this given ID.
-func (d *driver) GraphDriverRemove(id string) error {
-	return nil
-}
-
-// Get the mountpoint for the layered filesystem referred to by the given ID.
-func (d *driver) GraphDriverGet(id, mountLabel string) (string, error) {
-	return "", nil
-}
-
-// Release the system resources for the specified ID,
-// such as unmounting the filesystem layer.
-func (d *driver) GraphDriverRelease(id string) error {
-	return nil
-}
-
-// Determine if a filesystem layer with the specified ID exists.
-func (d *driver) GraphDriverExists(id string) bool {
-	return false
-}
-
-// Get an archive of the changes between the filesystem layers specified by the ID
-// and Parent. Parent may be an empty string, in which case there is no parent.
-func (d *driver) GraphDriverDiff(id, parent string) io.Writer {
-	return nil
-}
-
-// Get a list of changes between the filesystem layers specified by the ID and Parent.
-// Parent may be an empty string, in which case there is no parent.
-func (d *driver) GraphDriverChanges(id, parent string) ([]api.GraphDriverChanges, error) {
-	changes := make([]api.GraphDriverChanges, 0)
-	return changes, nil
-}
-
-// Extract the changeset from the given diff into the layer with the specified ID and Parent
-func (d *driver) GraphDriverApplyDiff(id, parent string, diff io.Reader) (int, error) {
-	return 0, nil
-}
-
-// Calculate the changes between the specified ID
-func (d *driver) GraphDriverDiffSize(id, parent string) (int, error) {
-	return 0, nil
-}
-
-//
 // These functions below implement the volume driver interface.
 //
 
@@ -256,20 +201,20 @@ func (d *driver) Create(locator api.VolumeLocator, source *api.Source, spec *api
 	volPath := path.Join(nfsMountPath, volumeID)
 	err := os.MkdirAll(volPath, 0744)
 	if err != nil {
-		log.Println(err)
+		logrus.Println(err)
 		return api.BadVolumeID, err
 	}
 	if source != nil {
 		if len(source.Seed) != 0 {
 			seed, err := seed.New(source.Seed, spec.ConfigLabels)
 			if err != nil {
-				log.Warnf("Failed to initailize seed from %q : %v",
+				logrus.Warnf("Failed to initailize seed from %q : %v",
 					source.Seed, err)
 				return api.BadVolumeID, err
 			}
 			err = seed.Load(path.Join(volPath, config.DataDir))
 			if err != nil {
-				log.Warnf("Failed to  seed from %q to %q: %v",
+				logrus.Warnf("Failed to  seed from %q to %q: %v",
 					source.Seed, nfsMountPath, err)
 				return api.BadVolumeID, err
 			}
@@ -278,14 +223,14 @@ func (d *driver) Create(locator api.VolumeLocator, source *api.Source, spec *api
 
 	f, err := os.Create(path.Join(nfsMountPath, string(volumeID)+nfsBlockFile))
 	if err != nil {
-		log.Println(err)
+		logrus.Println(err)
 		return api.BadVolumeID, err
 	}
 	defer f.Close()
 
 	err = f.Truncate(int64(spec.Size))
 	if err != nil {
-		log.Println(err)
+		logrus.Println(err)
 		return api.BadVolumeID, err
 	}
 
@@ -312,7 +257,7 @@ func (d *driver) Create(locator api.VolumeLocator, source *api.Source, spec *api
 func (d *driver) Delete(volumeID api.VolumeID) error {
 	v, err := d.GetVol(volumeID)
 	if err != nil {
-		log.Println(err)
+		logrus.Println(err)
 		return err
 	}
 
@@ -324,7 +269,7 @@ func (d *driver) Delete(volumeID api.VolumeID) error {
 
 	err = d.DeleteVol(volumeID)
 	if err != nil {
-		log.Println(err)
+		logrus.Println(err)
 		return err
 	}
 
@@ -334,17 +279,17 @@ func (d *driver) Delete(volumeID api.VolumeID) error {
 func (d *driver) Mount(volumeID api.VolumeID, mountpath string) error {
 	v, err := d.GetVol(volumeID)
 	if err != nil {
-		log.Println(err)
+		logrus.Println(err)
 		return err
 	}
 
 	srcPath := path.Join(":", d.nfsPath, string(volumeID))
 	mountExists, err := d.mounter.Exists(srcPath, mountpath)
 	if !mountExists {
-		syscall.Unmount(mountpath, 0)
-		err = syscall.Mount(path.Join(nfsMountPath, string(volumeID)), mountpath, string(v.Spec.Format), syscall.MS_BIND, "")
+		d.mounter.Unmount(path.Join(nfsMountPath, string(volumeID)), mountpath)
+		err = d.mounter.Mount(0, path.Join(nfsMountPath, string(volumeID)), mountpath, string(v.Spec.Format), syscall.MS_BIND, "")
 		if err != nil {
-			log.Printf("Cannot mount %s at %s because %+v",
+			logrus.Printf("Cannot mount %s at %s because %+v",
 				path.Join(nfsMountPath, string(volumeID)), mountpath, err)
 			return err
 		}
@@ -364,7 +309,7 @@ func (d *driver) Unmount(volumeID api.VolumeID, mountpath string) error {
 	if v.AttachPath == "" {
 		return fmt.Errorf("Device %v not mounted", volumeID)
 	}
-	err = syscall.Unmount(v.AttachPath, 0)
+	err = d.mounter.Unmount(path.Join(nfsMountPath, string(volumeID)), v.AttachPath)
 	if err != nil {
 		return err
 	}
@@ -428,7 +373,7 @@ func (d *driver) Alerts(volumeID api.VolumeID) (api.Alerts, error) {
 }
 
 func (d *driver) Shutdown() {
-	log.Printf("%s Shutting down", Name)
+	logrus.Printf("%s Shutting down", Name)
 	syscall.Unmount(nfsMountPath, 0)
 }
 
